@@ -338,9 +338,9 @@ class AVR_Runner():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, default='train')
-    parser.add_argument('--config', type=str, default='avr.yml', help='config file path')
-    parser.add_argument('--dataset_dir', type=str, default='S1-M3969_npy')
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--config', type=str, default='config_files/avr_meshrir.yml', help='config file path')
+    parser.add_argument('--dataset_dir', type=str, default='~/data/dataset/MeshRIR/S1-M3969')
+    parser.add_argument('--batch_size', type=int, default=1)
     args = parser.parse_args()
 
 
@@ -378,6 +378,8 @@ if __name__ == '__main__':
     else:
         print("Source and destination are the same, skipping copy.")
 
+    # Load dataset directory
+    args.dataset_dir = os.path.expanduser(args.dataset_dir)
 
     worker = AVR_Runner(mode=args.mode, dataset_dir=args.dataset_dir, batchsize=args.batch_size, **kwargs)
     worker.train()
