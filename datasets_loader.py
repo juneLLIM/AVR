@@ -5,7 +5,8 @@ from torch.utils.data import Dataset
 import glob
 import librosa
 import math
-    
+
+
 class WaveLoader(Dataset):
     def __init__(self, base_folder, dataset_type='MeshRIR', eval=False, seq_len=2048, fs=16000):
         """DataLoader initializations, can load three different sets together
@@ -23,16 +24,11 @@ class WaveLoader(Dataset):
         fs : int, optional
             sampling rate of the audio, by default is 16000
         """
-        
+
         self.wave_chunks = []
         self.positions_rx = []
         self.positions_tx = []
         self.rotations_tx = []
-
-        # self.wave_max = float('-inf')
-        # self.wave_min = float('inf')
-        # self.position_max = np.array([float('-inf'), float('-inf'), float('-inf')])
-        # self.position_min = np.array([float('inf'), float('inf'), float('inf')])
 
         self.dataset_type = dataset_type
         self.eval = eval
@@ -48,50 +44,101 @@ class WaveLoader(Dataset):
             raise ValueError("Unsupported dataset type")
 
         # Convert lists to tensors for faster processing in __getitem__
-        self.wave_chunks = torch.tensor(np.array(self.wave_chunks), dtype=torch.complex64)
-        self.positions_rx = torch.tensor(np.array(self.positions_rx), dtype=torch.float32)
-        self.positions_tx = torch.tensor(np.array(self.positions_tx), dtype=torch.float32)
+        self.wave_chunks = torch.tensor(
+            np.array(self.wave_chunks), dtype=torch.complex64)
+        self.positions_rx = torch.tensor(
+            np.array(self.positions_rx), dtype=torch.float32)
+        self.positions_tx = torch.tensor(
+            np.array(self.positions_tx), dtype=torch.float32)
         if self.rotations_tx:
-            self.rotations_tx = torch.tensor(np.array(self.rotations_tx), dtype=torch.float32)
+            self.rotations_tx = torch.tensor(
+                np.array(self.rotations_tx), dtype=torch.float32)
+
+    def get_st_idxs(self, rx_pos, tx_pos,  base_folder, down_sample_rate, dataset_fs):
+        """ Precompute slice start indices for Physics-based Alignment
+        1. Find the closest microphone to the source
+        2. Load the corresponding RIR file and find the observed peak index
+        3. Calculate the theoretical time-of-flight based on distance
+        4. Compute system latency and adjust by down-sampling rate
+        5. Return the adjusted latency as the starting index for slicing
+        6. If any step fails, return a default start index of 0
+        """
+
+        # Identify unique transmitter positions to form groups
+        unique_txs, inverse_idxs = np.unique(
+            tx_pos, axis=0, return_inverse=True)
+
+        # Initialize result list with the same length as rx_pos
+        final_latency_idxs = [0] * len(rx_pos)
+
+        for tx_idx, current_tx in enumerate(unique_txs):
+            # Find indices of all RXs associated with the current TX
+            rx_indices = np.where(inverse_idxs == tx_idx)[0]
+            # Find the RX in the group that is closest to the TX
+            dists = np.linalg.norm(rx_pos[rx_indices] - current_tx, axis=1)
+            min_dist_local_idx = np.argmin(dists)
+            min_dist = dists[min_dist_local_idx]
+            min_dist_global_idx = rx_indices[min_dist_local_idx]
+
+            # Calculate latency_samples using the nearest RX-TX pair
+
+            try:
+                if self.dataset_type == 'MeshRIR':
+                    fname = f'ir_{min_dist_global_idx}.npy'
+
+                    for subdir in ['train', 'test']:
+                        full_path = os.path.join(base_folder, subdir, fname)
+                        if os.path.exists(full_path):
+                            break
+
+                    full_audio = np.load(full_path)[0]
+
+                elif self.dataset_type == 'RAF':
+                    fname = f'data/{min_dist_global_idx:06}/rir.wav'
+                    full_path = os.path.join(base_folder, fname)
+
+                    full_audio, _ = librosa.load(
+                        full_path, sr=dataset_fs, mono=True)
+
+                observed_peak_idx = np.argmax(np.abs(full_audio))
+
+                # Time-of-flight (samples)
+                tof_samples = (min_dist / 343.0) * dataset_fs
+
+                # System latency = actual onset - theoretical flight time
+                latency_samples = observed_peak_idx - tof_samples
+
+                if latency_samples < 0:
+                    print(
+                        f"Warning: Calculated latency is negative ({latency_samples}). Using default start index of 0.")
+                    latency_samples = 0
+                else:
+                    print(
+                        f"Computed Latency: {latency_samples:.2f} samples (at 48kHz)")
+
+                shared_latency_idx = int(latency_samples / down_sample_rate)
+
+            except Exception as e:
+                print(
+                    f"Warning: Could not find RIR file for closest mic. Using default start index. Error: {e}")
+                shared_latency_idx = 0
+
+            # Assign the SAME latency_idx to all members of this TX group
+            for i in rx_indices:
+                final_latency_idxs[i] = shared_latency_idx
+
+        return final_latency_idxs
 
     def load_mesh_rir(self, base_folder, eval, seq_len, fs=24000):
         """ Load MeshRIR datasets with Physics-based Alignment
         """
         down_sample_rate = 48000 // fs
-        
-        rx_pos = np.load(os.path.join(base_folder, 'pos_mic.npy'))
-        tx_pos = np.load(os.path.join(base_folder, 'pos_src.npy'))[0]
-        
-        try:
-            dists = np.linalg.norm(rx_pos - tx_pos, axis=1)
-            min_dist_idx = np.argmin(dists)
-            min_dist = dists[min_dist_idx]
-            fname = f'ir_{min_dist_idx}.npy'
-            
-            for subdir in ['train', 'test']:
-                full_path = os.path.join(base_folder, subdir, fname)
-                if os.path.exists(full_path):
-                    break
-                
-            full_audio = np.load(full_path)[0]
-            observed_peak_idx = np.argmax(np.abs(full_audio))
-            
-            # Time-of-flight (samples)
-            tof_samples = (min_dist / 343.0) * 48000.0
-            
-            # System latency = actual onset - theoretical flight time
-            latency_samples = observed_peak_idx - tof_samples
-            
-            if latency_samples < 0:
-                print(f"Warning: Calculated latency is negative ({latency_samples}). Using safe default 8300.")
-                latency_samples = 8300
-            else:
-                print(f"Computed Latency: {latency_samples:.2f} samples (at 48kHz)")
 
-            self.default_st_idx = int(latency_samples / down_sample_rate)
-        except Exception as e:
-            print(f"Warning: Could not find RIR file for closest mic. Using safe default 8300. Error: {e}")
-            self.default_st_idx = int(8300 / down_sample_rate)
+        rx_pos = np.load(os.path.join(base_folder, 'pos_mic.npy'))
+        tx_pos = np.load(os.path.join(base_folder, 'pos_src.npy'))
+
+        default_st_idx = self.get_st_idxs(
+            rx_pos, tx_pos, base_folder, down_sample_rate, dataset_fs=48000)[0]
 
         if eval:
             wave_folder = os.path.join(base_folder, 'test')
@@ -102,15 +149,15 @@ class WaveLoader(Dataset):
         filenames.sort()
 
         for filename in filenames:
-            audio_data = np.load(os.path.join(wave_folder, filename))[0,::down_sample_rate] # first resample the IR data
-            audio_data = audio_data[self.default_st_idx:self.default_st_idx+seq_len] # index the IR data.
+            audio_data = np.load(os.path.join(wave_folder, filename))[
+                0, ::down_sample_rate]  # first resample the IR data
+            # index the IR data.
+            audio_data = audio_data[default_st_idx:default_st_idx+seq_len]
             wave_data = np.fft.rfft(audio_data)
 
             file_ind = int(filename.split('_')[1].split('.')[0])
             position_rx = rx_pos[file_ind]
             position_tx = tx_pos
-
-            # self.update_min_max(audio_data, position_rx)
 
             self.wave_chunks.append(wave_data)
             self.positions_rx.append(position_rx)
@@ -135,8 +182,6 @@ class WaveLoader(Dataset):
             position_rx = meta_data['position_rx']
             position_tx = meta_data['position_tx']
 
-            # self.update_min_max(audio_data, position_rx)
-
             self.wave_chunks.append(wave_data)
             self.positions_rx.append(position_rx)
             self.positions_tx.append(position_tx)
@@ -148,9 +193,9 @@ class WaveLoader(Dataset):
         folderpaths.sort()
 
         if eval:
-            folderpaths = glob.glob(f"{base_folder}/test/*")
+            folderpaths = glob.glob(f"{base_folder}/test/*/*")
         else:
-            folderpaths = glob.glob(f"{base_folder}/train/*")
+            folderpaths = glob.glob(f"{base_folder}/train/*/*")
         folderpaths.sort()
 
         for folderpath in folderpaths:
@@ -159,10 +204,10 @@ class WaveLoader(Dataset):
             audio_data = audio_data[:seq_len * int(48000 / fs):int(48000 / fs)]
             wave_data = np.fft.rfft(audio_data)
 
-            position_rx = self.load_position(os.path.join(folderpath, "rx_pos.txt"))
-            position_tx, rotation_tx = self.load_tx_info(os.path.join(folderpath, "tx_pos.txt"))
-
-            # self.update_min_max(audio_data, position_rx)
+            position_rx = self.load_position(
+                os.path.join(folderpath, "rx_pos.txt"))
+            position_tx, rotation_tx = self.load_tx_info(
+                os.path.join(folderpath, "tx_pos.txt"))
 
             self.wave_chunks.append(wave_data)
             self.positions_rx.append(position_rx)
@@ -187,12 +232,6 @@ class WaveLoader(Dataset):
         position_tx = np.array(tx_info[4:])[[0, 2, 1]]
         return position_tx, rotation_tx
 
-    # def update_min_max(self, audio_data, position_rx):
-    #     self.wave_max = max(self.wave_max, audio_data.max())
-    #     self.wave_min = min(self.wave_min, audio_data.min())
-    #     self.position_max = np.maximum(self.position_max, position_rx)
-    #     self.position_min = np.minimum(self.position_min, position_rx)
-
     def __len__(self):
         return len(self.wave_chunks)
 
@@ -200,15 +239,15 @@ class WaveLoader(Dataset):
         wave_signal = self.wave_chunks[idx]
         position_rx = self.positions_rx[idx]
         position_tx = self.positions_tx[idx]
-        
+
         if not self.eval and self.dataset_type == 'RAF':
             position_rx = position_rx + torch.randn_like(position_rx) * 0.1
             position_tx = position_tx + torch.randn_like(position_tx) * 0.1
-        
+
         if self.dataset_type == 'RAF':
             rotation_tx = self.rotations_tx[idx]
             return wave_signal, position_rx, position_tx, rotation_tx
-        else: 
+        else:
             return wave_signal, position_rx, position_tx
 
 
@@ -233,5 +272,5 @@ def quaternion_to_direction_vector(q):
 
     # Normalize the vector (in case it's not exactly 1 due to numerical precision)
     norm = math.sqrt(fwd_x**2 + 0**2 + fwd_z**2)
-    
+
     return np.array([-fwd_x / norm, -fwd_z / norm, 0])

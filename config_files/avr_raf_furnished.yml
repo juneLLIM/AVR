@@ -2,7 +2,7 @@
 
 ### Path settings
 path:
-  expname: raf_test
+  expname: RAF_non_sliced_0.1s
   dataset_type: RAF
   logdir: logs/RAF_Furnished/
 
@@ -30,7 +30,7 @@ train:
   load_ckpt: False
   val_freq: 10000
   save_freq: 10000
-  total_iterations: 80000
+  total_iterations: 500000
 
   spec_loss_weight: 1
   amplitude_loss_weight: 1
