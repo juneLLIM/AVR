@@ -51,7 +51,7 @@ class AVR_Runner():
         # network and renderer
         self.fs = kwargs['render']['fs']
 
-        if self.dataset_type == 'MeshRIR' or self.dataset_type == 'Simu':
+        if self.dataset_type in ('MeshRIR', 'Simu', 'TAU-SRIR'):
             audionerf = AVRModel(kwargs_network) # network
         elif self.dataset_type == 'RAF':
             audionerf = AVRModel_complex(kwargs_network) # network

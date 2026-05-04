@@ -40,6 +40,8 @@ class WaveLoader(Dataset):
             self.load_raf(base_folder, eval, seq_len, fs)
         elif dataset_type == 'Simu':
             self.load_simu(base_folder, eval, seq_len, fs)
+        elif dataset_type == 'TAU-SRIR':
+            self.load_tau_srir(base_folder, eval, seq_len, fs)
         else:
             raise ValueError("Unsupported dataset type")
 
@@ -162,6 +164,89 @@ class WaveLoader(Dataset):
             self.wave_chunks.append(wave_data)
             self.positions_rx.append(position_rx)
             self.positions_tx.append(position_tx)
+
+    def load_tau_srir(self, base_folder, eval, seq_len, fs,
+                      room='bomb_shelter', native_fs=24000, split_axis='height'):
+        """Load TAU-SRIR DB (single room). Mirrors acousticGS/datasets.py:load_tau_srir.
+        FOA W-channel; mic centre treated as transmitter under acoustic reciprocity.
+        Re-inserts air TOF per receiver so direct sound lands at dist/c*fs.
+        Held-out test split = middle slice along chosen axis (default 'height').
+        """
+        import scipy.io as sio
+        import h5py
+
+        SPEED = 343.0
+        if native_fs % fs != 0:
+            raise ValueError(f"native_fs={native_fs} not a multiple of fs={fs}")
+        down = native_fs // fs
+
+        rirdata_path = os.path.join(base_folder, 'rirdata.mat')
+        rirdata = sio.loadmat(rirdata_path)['rirdata'][0, 0]
+        room_names = [str(rirdata['room'][i, 0]['name'][0])
+                      for i in range(rirdata['room'].shape[0])]
+        room_idx = room_names.index(room)
+        room_meta = rirdata['room'][room_idx, 0]
+        rirs_meta = room_meta['rirs']
+        n_dist, n_height = rirs_meta.shape
+
+        room_to_idx = {n: i + 1 for i, n in enumerate(room_names)}
+        candidates = [os.path.join(base_folder, f'rirs_{room_to_idx[room]:02d}_{room}.mat')]
+        if not any(os.path.exists(p) for p in candidates):
+            for fname in os.listdir(base_folder):
+                if fname.startswith('rirs_') and fname.endswith(f'_{room}.mat'):
+                    candidates.append(os.path.join(base_folder, fname))
+        rir_path = next(p for p in candidates if os.path.exists(p))
+
+        measinfo = sio.loadmat(os.path.join(base_folder, 'measinfo.mat'))['measinfo']
+        mic_pos = np.asarray(measinfo[room_idx, 0]['micPosition']).ravel().astype(np.float32)
+
+        with h5py.File(rir_path, 'r') as f:
+            foa_refs = f['rirs/foa']
+            n_height_h5, n_dist_h5 = foa_refs.shape
+            dist_arr = np.asarray(measinfo[room_idx, 0]['distances']).ravel()
+
+            if split_axis == 'height' and n_height_h5 > 1:
+                holdout_h = n_height_h5 // 2
+                holdout_d = None
+            elif split_axis == 'distance' and n_dist_h5 > 1:
+                holdout_h = None
+                holdout_d = n_dist_h5 // 2
+            else:
+                raise ValueError(f"Cannot split TAU room {room!r} on axis={split_axis}")
+
+            for h_idx in range(n_height_h5):
+                for d_idx in range(n_dist_h5):
+                    is_test = ((holdout_h is not None and h_idx == holdout_h)
+                               or (holdout_d is not None and d_idx == holdout_d))
+                    if eval and not is_test:
+                        continue
+                    if not eval and is_test:
+                        continue
+
+                    block = f[foa_refs[h_idx, d_idx]][:]
+                    doa = np.asarray(rirs_meta[d_idx, h_idx]['doa_xyz'])
+                    if doa.shape[0] != block.shape[0]:
+                        n = min(doa.shape[0], block.shape[0])
+                        doa = doa[:n]; block = block[:n]
+                    radius = float(dist_arr[d_idx]) if dist_arr.size == n_dist_h5 else 1.0
+                    src_pos = doa.astype(np.float32) * radius + mic_pos
+                    foa_w = block[:, 0, :].astype(np.float32)
+                    foa_w = foa_w[:, ::down]
+                    raw_T = foa_w.shape[1]
+                    for k in range(foa_w.shape[0]):
+                        rx = src_pos[k]
+                        dist = float(np.linalg.norm(rx - mic_pos))
+                        tof_samples = int(round(dist / SPEED * fs))
+                        out = np.zeros(seq_len, dtype=np.float32)
+                        if tof_samples < seq_len:
+                            copy_len = min(seq_len - tof_samples, raw_T)
+                            out[tof_samples:tof_samples + copy_len] = foa_w[k, :copy_len]
+                        wave_data = np.fft.rfft(out)
+                        self.wave_chunks.append(wave_data)
+                        self.positions_rx.append(rx)
+                        self.positions_tx.append(mic_pos)
+        print(f"TAU-SRIR room={room!r} eval={eval}: kept {len(self.wave_chunks)} RIRs. "
+              f"Held out: height_idx={holdout_h}, distance_idx={holdout_d}. fs={fs}")
 
     def load_simu(self, base_folder, eval, seq_len, fs):
         """ Load simulation datasets
