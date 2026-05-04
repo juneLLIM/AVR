@@ -28,9 +28,9 @@ class Criterion(nn.Module):
         pred_spec_energy = torch.sum(pred_spec ** 2, dim=1)
         ori_spec_energy = torch.sum(ori_spec ** 2, dim=1)
 
-        predict_energy = torch.log10(torch.flip(torch.cumsum(torch.flip(pred_spec_energy, [-1])**2, dim=-1), [-1]) + 1e-9)
+        predict_energy = torch.log10(torch.flip(torch.cumsum(torch.flip(pred_spec_energy, [-1]), dim=-1), [-1]) + 1e-9)
         predict_energy -= predict_energy[:,[0]]
-        ori_energy = torch.log10(torch.flip(torch.cumsum(torch.flip(ori_spec_energy, [-1])**2, dim=-1), [-1]) + 1e-9)
+        ori_energy = torch.log10(torch.flip(torch.cumsum(torch.flip(ori_spec_energy, [-1]), dim=-1), [-1]) + 1e-9)
         ori_energy -= ori_energy[:,[0]]
 
         real_loss = self.l1_loss(torch.real(pred_sig), torch.real(ori_sig))
