@@ -50,6 +50,8 @@ class InferRunner(AVR_Runner):
                     pred_sig = self.renderer(position_rx.cuda(), position_tx.cuda(), direction_tx.cuda())
                 else:
                     ori_sig, position_rx, position_tx = test_batch
+                    if position_tx.dim() == 3:
+                        position_tx = position_tx.squeeze(1)
                     pred_sig = self.renderer(position_rx.cuda(), position_tx.cuda())
                                                                 
                 pred_sig = pred_sig[...,0] + 1j * pred_sig[...,1]
